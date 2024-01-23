@@ -9,7 +9,6 @@ import (
 	"github.com/saiset-co/saiCosmosInteraction/internal/model"
 	"github.com/saiset-co/saiCosmosInteraction/utils"
 	"github.com/saiset-co/saiService"
-	"google.golang.org/grpc"
 )
 
 func (is *InternalService) NewHandler() saiService.Handler {
@@ -30,13 +29,6 @@ func (is *InternalService) makeTx(data, _ interface{}) (interface{}, int, error)
 		return "", http.StatusBadRequest, err
 	}
 
-	grpcConn, err := grpc.Dial(body.GrpcNodeAddress)
-	if err != nil {
-		return "", http.StatusInternalServerError, err
-	}
-
-	defer grpcConn.Close()
-
 	fileBytes, err := os.ReadFile(body.From)
 	if err != nil {
 		log.Println(body.From, err)
@@ -44,7 +36,7 @@ func (is *InternalService) makeTx(data, _ interface{}) (interface{}, int, error)
 	}
 
 	txMaker, err := NewTransactionMaker(
-		grpcConn,
+		body.NodeAddress,
 		body.ChainID,
 		body.From,
 		body.To,
@@ -69,15 +61,13 @@ func (is *InternalService) makeTx(data, _ interface{}) (interface{}, int, error)
 		return "", http.StatusInternalServerError, internalError
 	}
 
-	res, err := txMaker.BroadcastTx()
+	txHash, err := txMaker.BroadcastTx()
 	if err != nil {
 		log.Println(body.From, err)
 		return "", http.StatusInternalServerError, internalError
 	}
 
-	fmt.Println(res)
-
-	return "", http.StatusOK, nil
+	return txHash, http.StatusOK, nil
 }
 
 func (is *InternalService) validateBody(data interface{}) (model.MakeTxRequestBody, error) {
@@ -87,9 +77,9 @@ func (is *InternalService) validateBody(data interface{}) (model.MakeTxRequestBo
 		return body, fmt.Errorf("wrong request body")
 	}
 
-	body.GrpcNodeAddress, ok = dataMap["grpc_node_address"].(string)
+	body.NodeAddress, ok = dataMap["node_address"].(string)
 	if !ok {
-		return body, fmt.Errorf("grpc_node_address field not string")
+		return body, fmt.Errorf("node_address field not string")
 	}
 
 	body.From, ok = dataMap["from"].(string)
@@ -105,6 +95,11 @@ func (is *InternalService) validateBody(data interface{}) (model.MakeTxRequestBo
 	body.ChainID, ok = dataMap["chain_id"].(string)
 	if !ok {
 		return body, fmt.Errorf("chain_id field not string")
+	}
+
+	body.Passphrase, ok = dataMap["passphrase"].(string)
+	if !ok {
+		return body, fmt.Errorf("passphrase field not string")
 	}
 
 	var err error

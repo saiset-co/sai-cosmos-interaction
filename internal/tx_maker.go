@@ -1,8 +1,17 @@
 package internal
 
 import (
-	"context"
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"time"
+
+	jsoniter "github.com/json-iterator/go"
+	"github.com/saiset-co/saiCosmosInteraction/internal/model"
+	"github.com/spf13/cast"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/google/uuid"
@@ -17,27 +26,27 @@ import (
 	"github.com/cosmos/cosmos-sdk/types/tx/signing"
 	xauthsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
-	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	"google.golang.org/grpc"
 )
 
 type TransactionMaker struct {
-	grpcConn         *grpc.ClientConn
-	codec            *codec.ProtoCodec
-	txConfig         client.TxConfig
-	txBuilder        client.TxBuilder
-	senderAcc        types.AccAddress
-	senderAccBase    *authtypes.BaseAccount
-	senderPrivateKey cryptotypes.PrivKey
-	receiverAcc      types.AccAddress
-	chainID          string
-	kring            keyring.Keyring
+	nodeAddress   string
+	cli           http.Client
+	codec         *codec.ProtoCodec
+	txConfig      client.TxConfig
+	txBuilder     client.TxBuilder
+	senderAcc     types.AccAddress
+	senderAccInfo model.AccountInfo
+	receiverAcc   types.AccAddress
+	chainID       string
+	kRing         keyring.Keyring
+	kRingUUID     string
 }
 
-func NewTransactionMaker(grpcConn *grpc.ClientConn, chainID, senderAddress, receiverAddress, passphrase string, privateKey []byte) (*TransactionMaker, error) {
+func NewTransactionMaker(nodeAddress string, chainID, senderAddress, receiverAddress, passphrase string, privateKey []byte) (*TransactionMaker, error) {
 	tm := new(TransactionMaker)
-	tm.grpcConn = grpcConn
+	tm.nodeAddress = nodeAddress
+	tm.cli = http.Client{Timeout: time.Second * 5}
 
 	var err error
 	tm.senderAcc, err = types.AccAddressFromBech32(senderAddress)
@@ -50,21 +59,23 @@ func NewTransactionMaker(grpcConn *grpc.ClientConn, chainID, senderAddress, rece
 		return nil, err
 	}
 
-	tm.senderAccBase, err = tm.GetAccountInfo(tm.senderAcc.String())
+	tm.senderAccInfo, err = tm.GetAccountInfo(tm.senderAcc.String())
 	if err != nil {
 		return nil, err
 	}
 
 	interfaceRegistry := codectypes.NewInterfaceRegistry()
 	interfaceRegistry.RegisterInterface("types.PubKey", (*cryptotypes.PubKey)(nil), &secp256k1.PubKey{})
+	interfaceRegistry.RegisterInterface("types.PrivKey", (*cryptotypes.PrivKey)(nil), &secp256k1.PrivKey{})
 	interfaceRegistry.RegisterInterface("types.Msg", (*types.Msg)(nil), &banktypes.MsgSend{})
 	tm.codec = codec.NewProtoCodec(interfaceRegistry)
 	tm.txConfig = authtx.NewTxConfig(tm.codec, authtx.DefaultSignModes)
 	tm.txBuilder = tm.txConfig.NewTxBuilder()
 	tm.chainID = chainID
 
-	tm.kring = keyring.NewInMemory(tm.codec)
-	err = tm.kring.ImportPrivKey(uuid.New().String(), string(privateKey), passphrase)
+	tm.kRing = keyring.NewInMemory(tm.codec)
+	tm.kRingUUID = uuid.New().String()
+	err = tm.kRing.ImportPrivKey(tm.kRingUUID, string(privateKey), passphrase)
 	if err != nil {
 		return nil, err
 	}
@@ -91,13 +102,25 @@ func (tm *TransactionMaker) BuildTx(gasLimit uint64, amount, feeAmount int64, me
 }
 
 func (tm *TransactionMaker) SignTx() error {
-	err := tm.txBuilder.SetSignatures(signing.SignatureV2{
-		PubKey: tm.senderAccBase.GetPubKey(),
+	rec, err := tm.kRing.Key(tm.kRingUUID)
+	if err != nil {
+		return err
+	}
+
+	pubKey, err := rec.GetPubKey()
+	if err != nil {
+		return err
+	}
+
+	seq := cast.ToUint64(tm.senderAccInfo.Account.Sequence)
+	num := cast.ToUint64(tm.senderAccInfo.Account.AccountNumber)
+	err = tm.txBuilder.SetSignatures(signing.SignatureV2{
+		PubKey: pubKey,
 		Data: &signing.SingleSignatureData{
 			SignMode:  tm.txConfig.SignModeHandler().DefaultMode(),
 			Signature: nil,
 		},
-		Sequence: tm.senderAccBase.GetSequence(),
+		Sequence: seq,
 	})
 
 	if err != nil {
@@ -107,9 +130,9 @@ func (tm *TransactionMaker) SignTx() error {
 	signerData := xauthsigning.SignerData{
 		Address:       tm.senderAcc.String(),
 		ChainID:       tm.chainID,
-		AccountNumber: tm.senderAccBase.GetAccountNumber(),
-		Sequence:      tm.senderAccBase.GetSequence(),
-		PubKey:        tm.senderAccBase.GetPubKey(),
+		AccountNumber: num,
+		Sequence:      seq,
+		PubKey:        pubKey,
 	}
 
 	var sigV2 signing.SignatureV2
@@ -120,7 +143,7 @@ func (tm *TransactionMaker) SignTx() error {
 		return err
 	}
 
-	sig, _, err := tm.kring.SignByAddress(tm.senderAcc, signBytes)
+	sig, _, err := tm.kRing.SignByAddress(tm.senderAcc, signBytes)
 	if err != nil {
 		return err
 	}
@@ -131,7 +154,7 @@ func (tm *TransactionMaker) SignTx() error {
 	}
 
 	sigV2 = signing.SignatureV2{
-		PubKey:   tm.senderAccBase.GetPubKey(),
+		PubKey:   pubKey,
 		Data:     &sigData,
 		Sequence: signerData.Sequence,
 	}
@@ -141,44 +164,91 @@ func (tm *TransactionMaker) SignTx() error {
 	return err
 }
 
-func (tm *TransactionMaker) BroadcastTx() (*tx.BroadcastTxResponse, error) {
+func (tm *TransactionMaker) BroadcastTx() (string, error) {
+	const urlTemplate = "%s/cosmos/tx/v1beta1/txs"
+
 	txBytes, err := tm.txConfig.TxEncoder()(tm.txBuilder.GetTx())
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	// JSON String (not required, just showing for reference)
-	qeqweqasd := tm.txBuilder.GetTx()
-	txBytesJson, err := tm.txConfig.TxJSONEncoder()(qeqweqasd)
+	// Debug
+	txBytesJson, err := tm.txConfig.TxJSONEncoder()(tm.txBuilder.GetTx())
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	fmt.Println("txBytesJson", string(txBytesJson))
+	log.Println("tx details", string(txBytesJson))
+	//
 
-	txClient := tx.NewServiceClient(tm.grpcConn)
-	grpcRes, err := txClient.BroadcastTx(
-		context.TODO(),
-		&tx.BroadcastTxRequest{
-			Mode:    tx.BroadcastMode_BROADCAST_MODE_SYNC,
-			TxBytes: txBytes,
-		},
+	broadcastReq := model.TxBroadcastReq{
+		TxBytes: base64.StdEncoding.EncodeToString(txBytes),
+		Mode:    tx.BroadcastMode_BROADCAST_MODE_SYNC.String(),
+	}
+
+	txReqBytes, err := jsoniter.Marshal(broadcastReq)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest(http.MethodPost,
+		fmt.Sprintf(urlTemplate, tm.nodeAddress),
+		bytes.NewReader(txReqBytes),
 	)
+	if err != nil {
+		return "", err
+	}
 
-	return grpcRes, err
+	res, err := tm.cli.Do(req)
+	if err != nil {
+		return "", err
+	}
+
+	defer res.Body.Close()
+
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("%s", bodyBytes)
+	}
+
+	broadcastRes := model.TxBroadcastRes{}
+	err = jsoniter.Unmarshal(bodyBytes, &broadcastRes)
+	if err != nil {
+		return "", err
+	}
+
+	if broadcastRes.TxResponse.Code != 0 {
+		return "", fmt.Errorf("%s", bodyBytes)
+	}
+
+	return broadcastRes.TxResponse.Txhash, nil
 }
 
-func (tm *TransactionMaker) GetAccountInfo(address string) (*authtypes.BaseAccount, error) {
-	res, err := authtypes.NewQueryClient(tm.grpcConn).
-		Account(context.TODO(), &authtypes.QueryAccountRequest{
-			Address: address,
-		})
+func (tm *TransactionMaker) GetAccountInfo(address string) (model.AccountInfo, error) {
+	const urlTemplate = "%s/cosmos/auth/v1beta1/accounts/%s"
+
+	res, err := tm.cli.Get(fmt.Sprintf(urlTemplate, "https://rest.sentry-01.theta-testnet.polypore.xyz", address))
 	if err != nil {
-		return nil, err
+		return model.AccountInfo{}, err
 	}
 
-	acc := new(authtypes.BaseAccount)
-	err = tm.codec.Unmarshal(res.Account.Value, acc)
+	defer res.Body.Close()
 
-	return acc, err
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return model.AccountInfo{}, err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return model.AccountInfo{}, fmt.Errorf("%s", bodyBytes)
+	}
+
+	ai := model.AccountInfo{}
+	err = jsoniter.Unmarshal(bodyBytes, &ai)
+
+	return ai, err
 }
