@@ -5,20 +5,13 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"time"
-
-	jsoniter "github.com/json-iterator/go"
-	"github.com/saiset-co/saiCosmosInteraction/internal/model"
-	"github.com/spf13/cast"
-
-	"github.com/cosmos/cosmos-sdk/crypto/keyring"
-	"github.com/google/uuid"
 
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
+	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/cosmos/cosmos-sdk/types"
@@ -27,6 +20,12 @@ import (
 	xauthsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
+	"github.com/google/uuid"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/saiset-co/sai-service-crud-plus/logger"
+	"github.com/saiset-co/saiCosmosInteraction/internal/model"
+	"github.com/spf13/cast"
+	"go.uber.org/zap"
 )
 
 type TransactionMaker struct {
@@ -178,7 +177,7 @@ func (tm *TransactionMaker) BroadcastTx() (string, error) {
 		return "", err
 	}
 
-	log.Println("tx details", string(txBytesJson))
+	logger.Logger.Debug("tx details", zap.ByteString("tx", txBytesJson))
 	//
 
 	broadcastReq := model.TxBroadcastReq{
@@ -231,7 +230,7 @@ func (tm *TransactionMaker) BroadcastTx() (string, error) {
 func (tm *TransactionMaker) GetAccountInfo(address string) (model.AccountInfo, error) {
 	const urlTemplate = "%s/cosmos/auth/v1beta1/accounts/%s"
 
-	res, err := tm.cli.Get(fmt.Sprintf(urlTemplate, "https://rest.sentry-01.theta-testnet.polypore.xyz", address))
+	res, err := tm.cli.Get(fmt.Sprintf(urlTemplate, tm.nodeAddress, address))
 	if err != nil {
 		return model.AccountInfo{}, err
 	}

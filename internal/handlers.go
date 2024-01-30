@@ -2,13 +2,14 @@ package internal
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 
+	"github.com/saiset-co/sai-service-crud-plus/logger"
 	"github.com/saiset-co/saiCosmosInteraction/internal/model"
 	"github.com/saiset-co/saiCosmosInteraction/utils"
 	"github.com/saiset-co/saiService"
+	"go.uber.org/zap"
 )
 
 func (is *InternalService) NewHandler() saiService.Handler {
@@ -31,7 +32,7 @@ func (is *InternalService) makeTx(data, _ interface{}) (interface{}, int, error)
 
 	fileBytes, err := os.ReadFile(body.From)
 	if err != nil {
-		log.Println(body.From, err)
+		logger.Logger.Error(body.From, zap.Error(err))
 		return "", http.StatusInternalServerError, fmt.Errorf("don't have private key for %s", body.From)
 	}
 
@@ -45,25 +46,25 @@ func (is *InternalService) makeTx(data, _ interface{}) (interface{}, int, error)
 	)
 
 	if err != nil {
-		log.Println(body.From, err)
+		logger.Logger.Error(body.From, zap.Error(err))
 		return "", http.StatusInternalServerError, internalError
 	}
 
 	err = txMaker.BuildTx(uint64(body.GasLimit), body.Amount, body.FeeAmount, body.Memo)
 	if err != nil {
-		log.Println(body.From, err)
+		logger.Logger.Error(body.From, zap.Error(err))
 		return "", http.StatusInternalServerError, internalError
 	}
 
 	err = txMaker.SignTx()
 	if err != nil {
-		log.Println(body.From, err)
+		logger.Logger.Error(body.From, zap.Error(err))
 		return "", http.StatusInternalServerError, internalError
 	}
 
 	txHash, err := txMaker.BroadcastTx()
 	if err != nil {
-		log.Println(body.From, err)
+		logger.Logger.Error(body.From, zap.Error(err))
 		return "", http.StatusInternalServerError, internalError
 	}
 
